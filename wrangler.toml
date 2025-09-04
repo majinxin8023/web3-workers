@@ -1,0 +1,24 @@
+name = "web3-workers"
+main = "src/index.js"
+compatibility_date = "2023-12-18"
+
+[env.production]
+name = "web3-workers-prod"
+
+[env.staging]
+name = "web3-workers-staging"
+
+# 如果你需要环境变量，可以在这里添加
+# [vars]
+# ENVIRONMENT = "development"
+
+# 如果你需要KV存储，可以在这里配置
+# [[kv_namespaces]]
+# binding = "MY_KV_NAMESPACE"
+# id = "your-kv-namespace-id"
+
+# D1数据库配置
+[[d1_databases]]
+binding = "DB"
+database_name = "web3-workers-db"
+database_id = "your-database-id"  # 需要替换为实际的数据库ID
