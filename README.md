@@ -129,7 +129,7 @@ curl -X POST "https://your-worker.your-subdomain.workers.dev/api/update-username
 [[d1_databases]]
 binding = "DB"
 database_name = "web3-workers-db"
-database_id = "your-database-id"  # 替换为实际的数据库ID
+database_id = "a99197bc-d7b8-4730-ab0a-ff4d34156a01"  # 实际的数据库ID
 ```
 
 ### 环境变量
@@ -220,13 +220,59 @@ npx wrangler deploy --env production
 
 MIT License - 查看 [LICENSE](LICENSE) 文件了解详情。
 
+## 🆘 故障排除
+
+### 常见问题
+
+#### 1. D1 数据库配置错误
+
+**错误信息**: `You must use a real database in the database_id configuration`
+
+**解决方案**:
+
+```bash
+# 1. 查看现有数据库
+npx wrangler d1 list
+
+# 2. 更新 wrangler.toml 中的 database_id
+# 将 "your-database-id" 替换为实际的数据库 ID
+
+# 3. 应用数据库表结构
+npx wrangler d1 execute web3-workers-db --file=./schema.sql
+```
+
+#### 2. 端口被占用
+
+**错误信息**: `Address already in use`
+
+**解决方案**:
+
+```bash
+# 使用不同的端口
+npx wrangler dev --local --port 8788
+
+# 或者杀死占用端口的进程
+pkill -f wrangler
+```
+
+#### 3. 依赖安装问题
+
+**解决方案**:
+
+```bash
+# 清理并重新安装
+rm -rf node_modules package-lock.json
+npm install
+```
+
 ## 🆘 支持
 
 如果你遇到任何问题，请：
 
 1. 查看 [Cloudflare Workers 文档](https://developers.cloudflare.com/workers/)
-2. 在 GitHub 上创建 Issue
-3. 联系项目维护者
+2. 查看 [Cloudflare D1 数据库文档](https://developers.cloudflare.com/d1/)
+3. 在 GitHub 上创建 Issue
+4. 联系项目维护者
 
 ---
 

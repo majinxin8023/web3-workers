@@ -21,4 +21,4 @@ name = "web3-workers-staging"
 [[d1_databases]]
 binding = "DB"
 database_name = "web3-workers-db"
-database_id = "your-database-id"  # 需要替换为实际的数据库ID
+database_id = "a99197bc-d7b8-4730-ab0a-ff4d34156a01"
