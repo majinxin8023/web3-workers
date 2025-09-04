@@ -1,6 +1,26 @@
 // 导入必要的库
 import { ethers } from "ethers";
 
+// CORS头部配置
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization, X-Requested-With",
+  "Access-Control-Max-Age": "86400",
+};
+
+// 创建带CORS头部的响应
+function createCorsResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      ...corsHeaders,
+    },
+  });
+}
+
 // Cloudflare Worker 中的处理逻辑
 export async function handleUpdateUsername(request, env) {
   try {
@@ -10,12 +30,12 @@ export async function handleUpdateUsername(request, env) {
 
     // 1. 基础验证
     if (!walletAddress || !newUsername || !signature || !message) {
-      return new Response(
-        JSON.stringify({
+      return createCorsResponse(
+        {
           success: false,
           error: "缺少必要参数",
-        }),
-        { status: 400 }
+        },
+        400
       );
     }
 
@@ -25,12 +45,12 @@ export async function handleUpdateUsername(request, env) {
     const session = await verifySession(env.DB, sessionToken, walletAddress);
 
     if (!session) {
-      return new Response(
-        JSON.stringify({
+      return createCorsResponse(
+        {
           success: false,
           error: "会话无效或已过期",
-        }),
-        { status: 401 }
+        },
+        401
       );
     }
 
@@ -41,12 +61,12 @@ export async function handleUpdateUsername(request, env) {
       walletAddress
     );
     if (!isValidSignature) {
-      return new Response(
-        JSON.stringify({
+      return createCorsResponse(
+        {
           success: false,
           error: "签名验证失败",
-        }),
-        { status: 400 }
+        },
+        400
       );
     }
 
@@ -55,12 +75,12 @@ export async function handleUpdateUsername(request, env) {
     const timeDiff = Math.abs(now - timestamp);
     if (timeDiff > 5 * 60 * 1000) {
       // 5分钟有效期
-      return new Response(
-        JSON.stringify({
+      return createCorsResponse(
+        {
           success: false,
           error: "操作已过期，请重新操作",
-        }),
-        { status: 400 }
+        },
+        400
       );
     }
 
@@ -75,12 +95,12 @@ export async function handleUpdateUsername(request, env) {
       .first();
 
     if (existingNonce) {
-      return new Response(
-        JSON.stringify({
+      return createCorsResponse(
+        {
           success: false,
           error: "请勿重复提交",
-        }),
-        { status: 400 }
+        },
+        400
       );
     }
 
@@ -128,25 +148,22 @@ export async function handleUpdateUsername(request, env) {
         .bind(nonce, walletAddress)
         .run();
 
-      return new Response(
-        JSON.stringify({
-          success: true,
-          message: "用户名修改成功",
-          newUsername: newUsername,
-        })
-      );
+      return createCorsResponse({
+        success: true,
+        message: "用户名修改成功",
+        newUsername: newUsername,
+      });
     } else {
       throw new Error("数据库更新失败");
     }
   } catch (error) {
-    ß;
     console.error("更新用户名失败:", error);
-    return new Response(
-      JSON.stringify({
+    return createCorsResponse(
+      {
         success: false,
         error: error.message || "服务器内部错误",
-      }),
-      { status: 500 }
+      },
+      500
     );
   }
 }
@@ -209,47 +226,30 @@ export default {
       // 路由处理
       switch (path) {
         case "/":
-          return new Response(
-            JSON.stringify({
-              message: "Web3 Workers API",
-              version: "1.0.0",
-              endpoints: ["POST /api/update-username - 更新用户名"],
-            }),
-            {
-              headers: { "Content-Type": "application/json", ...corsHeaders },
-            }
-          );
+          return createCorsResponse({
+            message: "Web3 Workers API",
+            version: "1.0.0",
+            endpoints: ["POST /api/update-username - 更新用户名"],
+          });
 
         case "/api/update-username":
           if (method === "POST") {
             return await handleUpdateUsername(request, env);
           } else {
-            return new Response(
-              JSON.stringify({ error: "Method not allowed" }),
-              {
-                status: 405,
-                headers: { "Content-Type": "application/json", ...corsHeaders },
-              }
-            );
+            return createCorsResponse({ error: "Method not allowed" }, 405);
           }
 
         default:
-          return new Response(JSON.stringify({ error: "Not Found" }), {
-            status: 404,
-            headers: { "Content-Type": "application/json", ...corsHeaders },
-          });
+          return createCorsResponse({ error: "Not Found" }, 404);
       }
     } catch (error) {
       console.error("Request handling error:", error);
-      return new Response(
-        JSON.stringify({
+      return createCorsResponse(
+        {
           error: "Internal Server Error",
           message: error.message,
-        }),
-        {
-          status: 500,
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        }
+        },
+        500
       );
     }
   },
