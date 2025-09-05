@@ -30,11 +30,18 @@ function createCorsResponse(data, status = 200) {
 export async function handleUpdateUsername(request, env) {
   try {
     const data = await request.json();
-    const { walletAddress, newUsername, signature, message, timestamp, nonce } =
-      data;
+    const {
+      walletAddress,
+      newUsername,
+      signature,
+      message,
+      timestamp,
+      nonce,
+      jwtToken,
+    } = data;
 
     // 1. 基础验证
-    if (!walletAddress || !newUsername || !signature || !message) {
+    if (!walletAddress || !newUsername) {
       return createCorsResponse(
         {
           success: false,
@@ -44,45 +51,109 @@ export async function handleUpdateUsername(request, env) {
       );
     }
 
-    // 3. 签名验证
-    const isValidSignature = verifyEthereumSignature(
-      message,
-      signature,
-      walletAddress
-    );
-    if (!isValidSignature) {
+    // 2. 智能认证：优先使用JWT token验证
+    if (jwtToken && jwtToken !== "cached_signature") {
+      console.log("🔐 使用JWT token验证");
+
+      try {
+        const { payload } = await jwtVerify(
+          jwtToken,
+          new TextEncoder().encode(JWT_SECRET)
+        );
+
+        // 验证token中的钱包地址
+        if (
+          payload.walletAddress?.toLowerCase() !== walletAddress.toLowerCase()
+        ) {
+          return createCorsResponse(
+            {
+              success: false,
+              error: "Token中的钱包地址不匹配",
+            },
+            401
+          );
+        }
+
+        // 验证token是否过期
+        const now = Math.floor(Date.now() / 1000);
+        if (payload.exp && payload.exp < now) {
+          return createCorsResponse(
+            {
+              success: false,
+              error: "Token已过期",
+            },
+            401
+          );
+        }
+
+        console.log("✅ JWT token验证成功");
+        // JWT验证成功，跳过签名验证
+      } catch (jwtError) {
+        console.error("❌ JWT token验证失败:", jwtError);
+        return createCorsResponse(
+          {
+            success: false,
+            error: "Token验证失败",
+          },
+          401
+        );
+      }
+    } else if (signature && message) {
+      console.log("🔐 使用签名验证");
+
+      // 3. 签名验证
+      const isValidSignature = verifyEthereumSignature(
+        message,
+        signature,
+        walletAddress
+      );
+      if (!isValidSignature) {
+        return createCorsResponse(
+          {
+            success: false,
+            error: "签名验证失败",
+          },
+          400
+        );
+      }
+    } else {
       return createCorsResponse(
         {
           success: false,
-          error: "签名验证失败",
+          error: "缺少认证信息（JWT token或签名）",
         },
         400
       );
     }
 
-    // 4. 时间戳验证（防止重放攻击）
-    const now = Date.now();
-    const timeDiff = Math.abs(now - timestamp);
-    if (timeDiff > 5 * 60 * 1000) {
-      // 5分钟有效期
-      return createCorsResponse(
-        {
-          success: false,
-          error: "操作已过期，请重新操作",
-        },
-        400
-      );
-    }
+    // 4. 时间戳和随机数验证（仅在使用签名验证时）
+    if (signature && message) {
+      const now = Date.now();
+      const timeDiff = Math.abs(now - timestamp);
+      if (timeDiff > 5 * 60 * 1000) {
+        // 5分钟有效期
+        return createCorsResponse(
+          {
+            success: false,
+            error: "操作已过期，请重新操作",
+          },
+          400
+        );
+      }
 
-    // 5. 随机数验证（防止重放攻击）
-    const existingNonce = await env.DB.prepare(
-      `SELECT id FROM user_operation_signatures WHERE nonce = ? AND wallet_address = ?`
-    )
-      .bind(nonce, walletAddress)
-      .first();
+      // 随机数验证（防止重放攻击）
+      const existingNonce = await env.DB.prepare(
+        `SELECT id FROM user_operation_signatures WHERE nonce = ? AND wallet_address = ?`
+      )
+        .bind(nonce, walletAddress)
+        .first();
 
-    if (existingNonce) {
-      return createCorsResponse({ success: false, error: "请勿重复提交" }, 400);
+      if (existingNonce) {
+        return createCorsResponse(
+          { success: false, error: "请勿重复提交" },
+          400
+        );
+      }
     }
 
     // 6. 首先确保用户存在（在外键约束之前）
@@ -114,25 +185,49 @@ export async function handleUpdateUsername(request, env) {
     }
 
     // 7. 记录操作签名（现在用户已存在，外键约束满足）
-    await env.DB.prepare(
+    if (signature && message) {
+      // 使用签名验证时的记录方式
+      await env.DB.prepare(
+        `
+        INSERT INTO user_operation_signatures (
+          wallet_address, operation_type, operation_data,
+          signature, message, nonce, timestamp, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `
-      INSERT INTO user_operation_signatures (
-        wallet_address, operation_type, operation_data,
-        signature, message, nonce, timestamp, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `
-    )
-      .bind(
-        walletAddress,
-        "update_username",
-        JSON.stringify({ newUsername }),
-        signature,
-        message,
-        nonce,
-        timestamp,
-        "completed"
       )
-      .run();
+        .bind(
+          walletAddress,
+          "update_username",
+          JSON.stringify({ newUsername }),
+          signature,
+          message,
+          nonce,
+          timestamp,
+          "completed"
+        )
+        .run();
+    } else {
+      // 使用JWT验证时的记录方式
+      await env.DB.prepare(
+        `
+        INSERT INTO user_operation_signatures (
+          wallet_address, operation_type, operation_data,
+          signature, message, nonce, timestamp, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+        .bind(
+          walletAddress,
+          "update_username",
+          JSON.stringify({ newUsername }),
+          "jwt_authenticated",
+          "JWT token authentication",
+          `jwt_${Date.now()}`,
+          Date.now(),
+          "completed"
+        )
+        .run();
+    }
 
     // 模拟成功响应
     console.log("✅ 签名验证通过，用户名更新成功");
