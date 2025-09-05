@@ -1,6 +1,6 @@
 // 导入必要的库
 import { ethers } from "ethers";
-import { SignJWT } from "jose";
+import { SignJWT, jwtVerify } from "jose";
 
 // JWT配置
 const JWT_SECRET = "your-super-secret-jwt-key-change-this-in-production";
