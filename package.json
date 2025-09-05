@@ -22,6 +22,7 @@
     "wrangler": "^4.33.2"
   },
   "dependencies": {
-    "ethers": "^6.8.1"
+    "ethers": "^6.8.1",
+    "jose": "^5.2.0"
   }
 }

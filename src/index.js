@@ -1,5 +1,10 @@
 // 导入必要的库
 import { ethers } from "ethers";
+import { SignJWT } from "jose";
+
+// JWT配置
+const JWT_SECRET = "your-super-secret-jwt-key-change-this-in-production";
+const JWT_EXPIRES_IN = "24h"; // Token有效期24小时
 
 // CORS头部配置
 const corsHeaders = {
@@ -80,29 +85,7 @@ export async function handleUpdateUsername(request, env) {
       return createCorsResponse({ success: false, error: "请勿重复提交" }, 400);
     }
 
-    // 6. 记录操作签名
-    await env.DB.prepare(
-      `
-      INSERT INTO user_operation_signatures (
-        wallet_address, operation_type, operation_data,
-        signature, message, nonce, timestamp, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `
-    )
-      .bind(
-        walletAddress,
-        "update_username",
-        JSON.stringify({ newUsername }),
-        signature,
-        message,
-        nonce,
-        timestamp,
-        "pending"
-      )
-      .run();
-
-    // 7. 执行用户名更新
-    // 首先确保用户存在
+    // 6. 首先确保用户存在（在外键约束之前）
     const existingUser = await env.DB.prepare(
       `SELECT id FROM users WHERE wallet_address = ?`
     )
@@ -120,7 +103,7 @@ export async function handleUpdateUsername(request, env) {
         .run();
     } else {
       // 更新现有用户
-      const updateResult = await env.DB.prepare(
+      await env.DB.prepare(
         `
         UPDATE users SET username = ?, updated_at = CURRENT_TIMESTAMP
         WHERE wallet_address = ?
@@ -130,15 +113,25 @@ export async function handleUpdateUsername(request, env) {
         .run();
     }
 
-    // 8. 更新操作状态为成功
+    // 7. 记录操作签名（现在用户已存在，外键约束满足）
     await env.DB.prepare(
       `
-      UPDATE user_operation_signatures 
-      SET status = 'completed' 
-      WHERE nonce = ? AND wallet_address = ?
+      INSERT INTO user_operation_signatures (
+        wallet_address, operation_type, operation_data,
+        signature, message, nonce, timestamp, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `
     )
-      .bind(nonce, walletAddress)
+      .bind(
+        walletAddress,
+        "update_username",
+        JSON.stringify({ newUsername }),
+        signature,
+        message,
+        nonce,
+        timestamp,
+        "completed"
+      )
       .run();
 
     // 模拟成功响应
@@ -199,6 +192,165 @@ function verifyEthereumSignature(message, signature, expectedAddress) {
   } catch (error) {
     console.error("签名验证错误:", error);
     return false;
+  }
+}
+
+// 生成JWT Token
+async function generateJWTToken(walletAddress, username = null) {
+  try {
+    const secret = new TextEncoder().encode(JWT_SECRET);
+
+    const token = await new SignJWT({
+      walletAddress,
+      username,
+      type: "auth",
+    })
+      .setProtectedHeader({ alg: "HS256" })
+      .setIssuedAt()
+      .setExpirationTime(JWT_EXPIRES_IN)
+      .setIssuer("web3-workers")
+      .setAudience("web3-course")
+      .sign(secret);
+
+    return token;
+  } catch (error) {
+    console.error("生成JWT Token失败:", error);
+    throw new Error("Token生成失败");
+  }
+}
+
+// 处理用户授权（生成JWT Token）
+export async function handleAuth(request, env) {
+  try {
+    const data = await request.json();
+    const { walletAddress, signature, message, timestamp, nonce } = data;
+
+    // 1. 基础验证
+    if (!walletAddress || !signature || !message) {
+      return createCorsResponse(
+        {
+          success: false,
+          error: "缺少必要参数",
+        },
+        400
+      );
+    }
+
+    // 2. 签名验证
+    const isValidSignature = verifyEthereumSignature(
+      message,
+      signature,
+      walletAddress
+    );
+    if (!isValidSignature) {
+      return createCorsResponse(
+        {
+          success: false,
+          error: "签名验证失败",
+        },
+        400
+      );
+    }
+
+    // 3. 时间戳验证（防止重放攻击）
+    const now = Date.now();
+    const timeDiff = Math.abs(now - timestamp);
+    if (timeDiff > 5 * 60 * 1000) {
+      // 5分钟有效期
+      return createCorsResponse(
+        {
+          success: false,
+          error: "操作已过期，请重新操作",
+        },
+        400
+      );
+    }
+
+    // 4. 随机数验证（防止重放攻击）
+    const existingNonce = await env.DB.prepare(
+      `SELECT id FROM user_operation_signatures WHERE nonce = ? AND wallet_address = ?`
+    )
+      .bind(nonce, walletAddress)
+      .first();
+
+    if (existingNonce) {
+      return createCorsResponse({ success: false, error: "请勿重复提交" }, 400);
+    }
+
+    // 5. 获取用户信息
+    const user = await env.DB.prepare(
+      `SELECT * FROM users WHERE wallet_address = ?`
+    )
+      .bind(walletAddress)
+      .first();
+
+    // 6. 生成JWT Token
+    const token = await generateJWTToken(walletAddress, user?.username || null);
+
+    // 7. 记录授权操作
+    await env.DB.prepare(
+      `
+      INSERT INTO user_operation_signatures (
+        wallet_address, operation_type, operation_data,
+        signature, message, nonce, timestamp, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `
+    )
+      .bind(
+        walletAddress,
+        "auth",
+        JSON.stringify({ action: "login" }),
+        signature,
+        message,
+        nonce,
+        timestamp,
+        "completed"
+      )
+      .run();
+
+    // 8. 生成会话记录（可选）
+    const sessionToken = `session_${Date.now()}_${Math.random()
+      .toString(36)
+      .substring(7)}`;
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24小时后过期
+
+    await env.DB.prepare(
+      `
+      INSERT INTO user_sessions (wallet_address, session_token, expires_at)
+      VALUES (?, ?, ?)
+    `
+    )
+      .bind(walletAddress, sessionToken, expiresAt.toISOString())
+      .run();
+
+    console.log("✅ 用户授权成功，Token已生成");
+    console.log("钱包地址:", walletAddress);
+    console.log("用户名:", user?.username || "未设置");
+
+    return createCorsResponse({
+      success: true,
+      message: "授权成功",
+      data: {
+        token,
+        sessionToken,
+        user: {
+          walletAddress,
+          username: user?.username || null,
+          isNewUser: !user,
+        },
+        expiresAt: expiresAt.toISOString(),
+        timestamp: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error("用户授权失败:", error);
+    return createCorsResponse(
+      {
+        success: false,
+        error: error.message || "服务器内部错误",
+      },
+      500
+    );
   }
 }
 
@@ -286,10 +438,18 @@ export default {
             message: "Web3 Workers API",
             version: "1.0.0",
             endpoints: [
+              "POST /api/auth - 用户授权（生成JWT Token）",
               "POST /api/update-username - 更新用户名",
               "GET /api/user?walletAddress=0x... - 获取用户信息",
             ],
           });
+
+        case "/api/auth":
+          if (method === "POST") {
+            return await handleAuth(request, env);
+          } else {
+            return createCorsResponse({ error: "Method not allowed" }, 405);
+          }
 
         case "/api/update-username":
           if (method === "POST") {
