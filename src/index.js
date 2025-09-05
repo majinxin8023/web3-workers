@@ -39,21 +39,6 @@ export async function handleUpdateUsername(request, env) {
       );
     }
 
-    // 2. 会话验证（暂时跳过，专注于签名验证）
-    // const authHeader = request.headers.get("Authorization");
-    // const sessionToken = authHeader?.replace("Bearer ", "");
-    // const session = await verifySession(env.DB, sessionToken, walletAddress);
-
-    // if (!session) {
-    //   return createCorsResponse(
-    //     {
-    //       success: false,
-    //       error: "会话无效或已过期",
-    //     },
-    //     401
-    //   );
-    // }
-
     // 3. 签名验证
     const isValidSignature = verifyEthereumSignature(
       message,
@@ -84,31 +69,77 @@ export async function handleUpdateUsername(request, env) {
       );
     }
 
-    // 5. 随机数验证（暂时跳过，因为没有数据库）
-    // const existingNonce = await env.DB.prepare(
-    //   `SELECT id FROM user_operation_signatures WHERE nonce = ? AND wallet_address = ?`
-    // ).bind(nonce, walletAddress).first();
+    // 5. 随机数验证（防止重放攻击）
+    const existingNonce = await env.DB.prepare(
+      `SELECT id FROM user_operation_signatures WHERE nonce = ? AND wallet_address = ?`
+    )
+      .bind(nonce, walletAddress)
+      .first();
 
-    // if (existingNonce) {
-    //   return createCorsResponse({ success: false, error: "请勿重复提交" }, 400);
-    // }
+    if (existingNonce) {
+      return createCorsResponse({ success: false, error: "请勿重复提交" }, 400);
+    }
 
-    // 6. 记录操作签名（暂时跳过）
-    // await env.DB.prepare(`
-    //   INSERT INTO user_operation_signatures (
-    //     wallet_address, operation_type, operation_data,
-    //     signature, message, nonce, timestamp, status
-    //   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    // `).bind(
-    //   walletAddress, "update_username", JSON.stringify({ newUsername }),
-    //   signature, message, nonce, timestamp, "pending"
-    // ).run();
+    // 6. 记录操作签名
+    await env.DB.prepare(
+      `
+      INSERT INTO user_operation_signatures (
+        wallet_address, operation_type, operation_data,
+        signature, message, nonce, timestamp, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `
+    )
+      .bind(
+        walletAddress,
+        "update_username",
+        JSON.stringify({ newUsername }),
+        signature,
+        message,
+        nonce,
+        timestamp,
+        "pending"
+      )
+      .run();
 
-    // 7. 执行用户名更新（暂时跳过数据库操作）
-    // const updateResult = await env.DB.prepare(`
-    //   UPDATE users SET username = ?, updated_at = CURRENT_TIMESTAMP
-    //   WHERE wallet_address = ?
-    // `).bind(newUsername, walletAddress).run();
+    // 7. 执行用户名更新
+    // 首先确保用户存在
+    const existingUser = await env.DB.prepare(
+      `SELECT id FROM users WHERE wallet_address = ?`
+    )
+      .bind(walletAddress)
+      .first();
+
+    if (!existingUser) {
+      // 创建新用户
+      await env.DB.prepare(
+        `
+        INSERT INTO users (wallet_address, username) VALUES (?, ?)
+      `
+      )
+        .bind(walletAddress, newUsername)
+        .run();
+    } else {
+      // 更新现有用户
+      const updateResult = await env.DB.prepare(
+        `
+        UPDATE users SET username = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE wallet_address = ?
+      `
+      )
+        .bind(newUsername, walletAddress)
+        .run();
+    }
+
+    // 8. 更新操作状态为成功
+    await env.DB.prepare(
+      `
+      UPDATE user_operation_signatures 
+      SET status = 'completed' 
+      WHERE nonce = ? AND wallet_address = ?
+    `
+    )
+      .bind(nonce, walletAddress)
+      .run();
 
     // 模拟成功响应
     console.log("✅ 签名验证通过，用户名更新成功");
@@ -171,6 +202,62 @@ function verifyEthereumSignature(message, signature, expectedAddress) {
   }
 }
 
+// 获取用户信息
+export async function handleGetUser(request, env) {
+  try {
+    const url = new URL(request.url);
+    const walletAddress = url.searchParams.get("walletAddress");
+
+    if (!walletAddress) {
+      return createCorsResponse(
+        { success: false, error: "缺少钱包地址参数" },
+        400
+      );
+    }
+
+    // 查询用户信息
+    const user = await env.DB.prepare(
+      `SELECT * FROM users WHERE wallet_address = ?`
+    )
+      .bind(walletAddress)
+      .first();
+
+    if (!user) {
+      return createCorsResponse({ success: false, error: "用户不存在" }, 404);
+    }
+
+    // 查询用户最近的操作记录
+    const operations = await env.DB.prepare(
+      `SELECT * FROM user_operation_signatures 
+       WHERE wallet_address = ? 
+       ORDER BY created_at DESC 
+       LIMIT 10`
+    )
+      .bind(walletAddress)
+      .all();
+
+    return createCorsResponse({
+      success: true,
+      data: {
+        user: {
+          id: user.id,
+          walletAddress: user.wallet_address,
+          username: user.username,
+          createdAt: user.created_at,
+          updatedAt: user.updated_at,
+        },
+        recentOperations: operations.results || [],
+      },
+    });
+  } catch (error) {
+    console.error("获取用户信息失败:", error);
+    return createCorsResponse(
+      { success: false, error: error.message || "服务器内部错误" },
+      500
+    );
+  }
+}
+
 // 主要的请求处理器
 export default {
   async fetch(request, env, ctx) {
@@ -198,12 +285,22 @@ export default {
           return createCorsResponse({
             message: "Web3 Workers API",
             version: "1.0.0",
-            endpoints: ["POST /api/update-username - 更新用户名"],
+            endpoints: [
+              "POST /api/update-username - 更新用户名",
+              "GET /api/user?walletAddress=0x... - 获取用户信息",
+            ],
           });
 
         case "/api/update-username":
           if (method === "POST") {
             return await handleUpdateUsername(request, env);
+          } else {
+            return createCorsResponse({ error: "Method not allowed" }, 405);
+          }
+
+        case "/api/user":
+          if (method === "GET") {
+            return await handleGetUser(request, env);
           } else {
             return createCorsResponse({ error: "Method not allowed" }, 405);
           }
